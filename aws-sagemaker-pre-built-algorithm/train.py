@@ -3,20 +3,16 @@ import pandas as pd
 import sagemaker
 from sagemaker import get_execution_role
 from sagemaker import image_uris, model_uris, script_uris
-def init_sagemaker():
-    # initialize sagemaker session
-    aws_role = get_execution_role()
-    aws_region = boto3.Session().region_name
-    sess = sagemaker.Session()
+import argparse
+
+import os
+
+from autogluon.tabular import TabularDataset, TabularPredictor
 
 
-def get_data(source):
-    # download data from s3 and give back a pandas dataframe
-    s3 = boto3.client('s3')
-    obj = s3.get_object(Bucket='sab-ds',Key=source)
-    data = pd.read_csv(obj['Body'])
-    return data
-def feature_engineering(data):
+
+def prepare_data(path):
+    data = pd.read_csv(path)
     age_bins = [20, 40, 60, 150]  # 100 as an upper bound for ages above 60
     risk_labels = ['Low Risk', 'Mid Risk', 'High Risk']
     data['risk_level'] = pd.cut(data['person_age'], bins=age_bins, labels=risk_labels)
@@ -50,6 +46,25 @@ def feature_engineering(data):
     data['loan_grade'] = data['loan_grade'].map(loan_grade_mapping)
     return data
 if __name__ == '__main__':
-    data = get_data('loan-approval/test.csv')
-    data = feature_engineering(data)
+     parser = argparse.ArgumentParser()
+
+    # SageMaker specific arguments: input/output directories
+     parser.add_argument('--train', type=str, default=os.environ['SM_CHANNEL_TRAIN'])
+     parser.add_argument('--model-dir', type=str, default=os.environ['SM_MODEL_DIR'])
+     args = parser.parse_args()
+
+     train_data = prepare_data(os.path.join(args.train, 'train.csv'))
+     train_data = TabularDataset(train_data)
+     train_data = train_data.drop(columns=['id'])
+
+    # Set target label for prediction
+     label = 'loan_status'
+    
+    # Create a TabularPredictor instance and train the model
+     predictor = TabularPredictor(label=label, eval_metric='roc_auc')
+     predictor.fit(train_data)
+
+    # Save the trained model to the output path provided by SageMaker
+     predictor_path = os.path.join(args.model_dir, 'loan_approval_model')
+     predictor.save(predictor_path)
     
