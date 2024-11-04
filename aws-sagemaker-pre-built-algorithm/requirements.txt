@@ -1,4 +1,0 @@
-boto
-sagemaker
-autogluon
-thinc==8.2.5

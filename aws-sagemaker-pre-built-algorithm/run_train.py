@@ -6,14 +6,14 @@ import boto3
 region = 'eu-central-1'
 boto_session = boto3.Session(region_name=region)
 session = sagemaker.Session(boto_session=boto_session)
-role = "arn:aws:iam::xxxx:role/SagemakerExecution"  # Replace with your SageMaker execution role
+role = "arn:aws:iam::538653532257:role/SagemakerExecution"  # Replace with your SageMaker execution role
 bucket = "sab-ds"  # or specify your bucket
 
 
 # Specify the container image for AutoGluon
 container = sagemaker.image_uris.retrieve(framework="autogluon", 
                                           region=region, 
-                                          version="0.4.0",
+                                          version="1.0.0",
                                           image_scope='training',
                                           instance_type="ml.m5.xlarge")
 
