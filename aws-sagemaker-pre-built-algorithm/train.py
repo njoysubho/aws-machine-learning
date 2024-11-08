@@ -61,10 +61,14 @@ if __name__ == '__main__':
      label = 'loan_status'
     
     # Create a TabularPredictor instance and train the model
-     predictor = TabularPredictor(label=label, eval_metric='roc_auc')
+     predictor = TabularPredictor(label=label, eval_metric='roc_auc',path='/opt/ml/model')
      predictor.fit(train_data)
 
     # Save the trained model to the output path provided by SageMaker
-     predictor_path = os.path.join(args.model_dir, 'loan_approval_model')
-     predictor.save(predictor_path)
+     model_path = "/opt/ml/model"
+     content = os.listdir(model_path)
+     print(content)
+     for item in content:
+          print(item)
+
     
