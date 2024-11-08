@@ -6,7 +6,7 @@ import boto3
 region = 'eu-central-1'
 boto_session = boto3.Session(region_name=region)
 session = sagemaker.Session(boto_session=boto_session)
-role = "arn:aws:iam::538653532257:role/SagemakerExecution"  # Replace with your SageMaker execution role
+role = "arn:aws:iam::xxxx:role/SagemakerExecution"  # Replace with your SageMaker execution role
 bucket = "sab-ds"  # or specify your bucket
 
 
