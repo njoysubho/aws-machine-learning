@@ -11,5 +11,6 @@ ENV AWS_REGION="eu-west-1"
 ENV LITELLM_MASTER_KEY="sk-sab2301"
 ENV UI_USERNAME="admin"
 ENV UI_PASSWORD="admin"
+ENV DATABASE_URL=""
 CMD [ "--port","4000","--config","litellm_config.yml","--detailed_debug","--run_gunicorn" ]
 
