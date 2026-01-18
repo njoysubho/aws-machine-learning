@@ -380,19 +380,33 @@ Attributes:
    - Message streaming (SSE or WebSockets)
    - Code/table formatting
    - Source citations (expandable)
+   - Tag/date filtering for queries
    - Loading states & error handling
 
-2. **Document Management**:
-   - View synced documents
-   - Manual sync trigger
-   - Document preview
-   - Delete/exclude documents
+2. **Document Upload & Management**: ⭐ NEW
+   - Upload PDFs/images directly to Google Drive
+   - Camera integration for mobile (scan documents)
+   - Smart tag suggestions using AI
+   - Create/manage tags on-the-fly
+   - Tag-based document organization
+   - Document library with filtering
+   - View/edit/delete documents
 
-3. **Settings**:
+3. **Deadline Tracking & Notifications**: ⭐ NEW
+   - Automatic deadline extraction from documents
+   - Calendar view of upcoming deadlines
+   - Email notifications (7-day and 30-day alerts)
+   - Configurable notification preferences
+   - Manual deadline management
+
+4. **Settings**:
    - Google Drive connection status
    - Privacy controls
    - Data retention settings
+   - Notification preferences
    - Export chat history
+
+**See**: `UI_FEATURES_SPEC.md` for detailed implementation
 
 #### 3.3.3 Mobile Optimization
 
@@ -428,13 +442,45 @@ vercel.json:
 **Endpoints**:
 
 ```
+# Query & Chat
 POST   /query
 GET    /sessions
 GET    /sessions/{session_id}
 DELETE /sessions/{session_id}
-GET    /documents
-POST   /documents/sync
-DELETE /documents/{document_id}
+
+# Document Management
+GET    /documents                      # List all docs (with tag/date filters)
+POST   /documents/upload               # Upload to Google Drive ⭐ NEW
+GET    /documents/{drive_file_id}
+PUT    /documents/{drive_file_id}      # Update name/tags
+DELETE /documents/{drive_file_id}
+PUT    /documents/{drive_file_id}/tags # Update tags only ⭐ NEW
+
+# Sync Operations
+POST   /sync                           # Trigger full/rebuild/incremental
+GET    /sync/{sync_id}/status
+DELETE /sync/{sync_id}
+
+# Tag Management ⭐ NEW
+GET    /tags                           # List all tags
+POST   /tags                           # Create new tag
+PUT    /tags/{tag_name}
+DELETE /tags/{tag_name}
+
+# Deadline Management ⭐ NEW
+GET    /deadlines                      # List upcoming deadlines
+GET    /deadlines/document/{drive_file_id}
+POST   /deadlines                      # Manually add deadline
+PUT    /deadlines/{deadline_id}
+DELETE /deadlines/{deadline_id}
+POST   /deadlines/extract/{drive_file_id} # Re-extract deadlines
+
+# User Preferences ⭐ NEW
+GET    /preferences
+PUT    /preferences
+POST   /preferences/test-email         # Send test notification
+
+# Health
 GET    /health
 ```
 
@@ -584,6 +630,9 @@ Session Duration: 1 hour (refresh: 30 days)
 | **Document Source** | Google Drive | Single source of truth, no duplicate storage |
 | **Session Storage** | DynamoDB | Serverless, fast, TTL support |
 | **Sync State** | DynamoDB | Track sync jobs, user preferences |
+| **Tags & Deadlines** | DynamoDB | Document organization, deadline tracking ⭐ NEW |
+| **Email Notifications** | Amazon SES | Deadline alerts, free tier ⭐ NEW |
+| **OCR** | Amazon Textract | Extract text from scanned images ⭐ NEW |
 | **Orchestration** | Step Functions | Visual workflows, error handling, retries |
 | **Secrets** | Secrets Manager | Automatic rotation, encryption |
 | **Monitoring** | CloudWatch + X-Ray | Integrated logging, distributed tracing |
@@ -697,16 +746,20 @@ Session Duration: 1 hour (refresh: 30 days)
 | **S3 (vectors only)** | 100 MB storage, 3,000 GET | $0.003 |
 | **Lambda (Sync)** | 500 files/month × 30s = 4.2 hrs | $2.50 |
 | **Lambda (Query)** | 3,000 invocations × 3s, 3008 MB | $1.80 |
+| **Lambda (Deadline Checker)** | 30 invocations × 10s ⭐ NEW | $0.01 |
 | **Bedrock (Claude Sonnet)** | 3,000 queries, 2K input + 1K output | $18.00 |
 | **Bedrock (Titan Embeddings)** | 5,000 chunks × 512 tokens | $0.65 (one-time) |
-| **DynamoDB** | Sync state + sessions, on-demand | $1.25 |
+| **Bedrock (Haiku - Tag Suggestions)** | 50 calls/month ⭐ NEW | $0.10 |
+| **DynamoDB** | Sync + sessions + tags + deadlines ⭐ NEW | $1.75 |
 | **Step Functions** | 500 state transitions/month | $0.01 |
-| **API Gateway** | 3,000 requests | $0.01 |
+| **API Gateway** | 3,500 requests (added upload) ⭐ NEW | $0.01 |
 | **Cognito** | 1 MAU | Free |
+| **SES (Email Notifications)** | 30 emails/month ⭐ NEW | Free |
+| **Textract (OCR for images)** | 50 pages/month ⭐ NEW | $0.75 |
 | **CloudWatch Logs** | 5 GB | $2.50 |
 | **Vercel** | Hobby plan | $0 (or $20 Pro) |
 | **Data Transfer** | 1 GB | $0.09 |
-| **Total (Ongoing)** | | **~$26.16/month** |
+| **Total (Ongoing)** | | **~$28.17/month** |
 
 **Initial Setup Cost**: +$0.65 (one-time embedding generation)
 
@@ -739,7 +792,7 @@ For >10,000 documents, >100 queries/day:
    - Skip full rebuilds unless necessary
    - Reduces Lambda compute time
 
-**Optimized estimate**: **~$20/month** (with caching + Haiku for 50% of queries)
+**Optimized estimate**: **~$22/month** (with caching + Haiku for 50% of queries)
 
 ---
 
@@ -937,7 +990,9 @@ cdk deploy   # Deploy to AWS
 **Project Owner**: [Your Name]
 **AWS Account ID**: [Your Account]
 **Estimated Timeline**: 11 weeks
-**Budget**: ~$26/month (optimized: ~$20/month with caching)
+**Budget**: ~$28/month (optimized: ~$22/month with caching)
+
+**Note**: See `UI_FEATURES_SPEC.md` for upload, tagging, and notification features
 
 ---
 
