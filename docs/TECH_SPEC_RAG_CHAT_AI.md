@@ -17,61 +17,71 @@ A privacy-first conversational AI system that enables natural language querying 
 ### 2.1 High-Level Architecture
 
 ```
-┌─────────────────┐
-│  Google Drive   │
-│  (Data Source)  │
-└────────┬────────┘
+┌─────────────────────────────────────────┐
+│          Google Drive (Source)          │
+│   Tax docs, Insurance, Receipts, etc.   │
+│      (Single Source of Truth)           │
+└────────┬────────────────────────────────┘
          │
-         │ Secure Sync
+         │ Drive API (Stream files)
          ▼
 ┌─────────────────────────────────────────┐
 │         AWS Cloud (Private VPC)         │
 │                                         │
-│  ┌──────────────┐    ┌───────────────┐ │
-│  │ S3 Bucket    │    │   Lambda      │ │
-│  │ (Encrypted)  │───▶│   Ingestion   │ │
-│  │              │    │   Pipeline    │ │
-│  └──────────────┘    └───────┬───────┘ │
-│                              │          │
-│                              ▼          │
-│  ┌──────────────┐    ┌───────────────┐ │
-│  │   Amazon     │◀───│  Embedding    │ │
-│  │   Bedrock    │    │  Generation   │ │
-│  │   (Claude)   │    └───────────────┘ │
-│  └──────┬───────┘            │          │
-│         │                    ▼          │
-│         │            ┌───────────────┐  │
-│         │            │   OpenSearch  │  │
-│         │            │ Serverless/   │  │
-│         │            │   Pinecone    │  │
-│         │            │ (Vector DB)   │  │
-│         │            └───────┬───────┘  │
-│         │                    │          │
-│         │                    │          │
-│         ▼                    ▼          │
-│  ┌────────────────────────────────────┐ │
-│  │     Lambda Functions (Agent)       │ │
-│  │  - Query Handler                   │ │
-│  │  - RAG Orchestrator                │ │
-│  │  - Document Retrieval              │ │
-│  └────────────────┬───────────────────┘ │
-│                   │                      │
-└───────────────────┼──────────────────────┘
-                    │ API Gateway (HTTPS)
-                    │ + Cognito Auth
-                    ▼
-         ┌──────────────────┐
-         │  Vercel Frontend │
-         │  (React/Next.js) │
-         │  Mobile-Friendly │
-         └──────────────────┘
+│  ┌──────────────────────────────────┐   │
+│  │  Lambda: Drive Sync & Process    │   │
+│  │  - Fetch files from Drive        │   │
+│  │  - Extract text (PDF, DOCX)      │   │
+│  │  - Chunk content                 │   │
+│  │  - Generate embeddings (Bedrock) │   │
+│  │  - Build FAISS index             │   │
+│  └──────────┬───────────────────────┘   │
+│             │                            │
+│             ▼                            │
+│  ┌──────────────────────────────────┐   │
+│  │   S3: Vector Storage             │   │
+│  │   - index.faiss (vectors)        │   │
+│  │   - metadata.json (chunks)       │   │
+│  │   - sync_state.json              │   │
+│  └──────────┬───────────────────────┘   │
+│             │                            │
+│             │ (Query time)               │
+│             ▼                            │
+│  ┌──────────────────────────────────┐   │
+│  │  Lambda: Query Handler           │   │
+│  │  1. Load FAISS from S3           │   │
+│  │  2. Vector search                │   │
+│  │  3. Retrieve chunks              │   │
+│  │  4. Call Bedrock Claude          │   │
+│  │  5. Return answer + citations    │   │
+│  └──────────┬───────────────────────┘   │
+│             │                            │
+└─────────────┼────────────────────────────┘
+              │ API Gateway (HTTPS)
+              │ + Cognito Auth
+              ▼
+   ┌──────────────────────┐
+   │  Vercel Frontend     │
+   │  (Next.js + React)   │
+   │  Mobile-Responsive   │
+   └──────────────────────┘
 ```
 
 ### 2.2 Data Flow
 
-1. **Ingestion**: Google Drive → S3 (encrypted) → Document Processing → Embedding Generation → Vector Store
-2. **Query**: User Query → Lambda Agent → Vector Search → Document Retrieval → LLM Context → Response
-3. **Security**: All traffic encrypted (TLS 1.3), authentication via AWS Cognito
+**Ingestion** (Three Modes):
+1. **Full Sync**: Process ALL Drive files → Extract text → Chunk → Embed → Build FAISS index → Save to S3
+2. **Rebuild**: Delete existing index → Re-process all files with new settings
+3. **Incremental**: Detect changed files → Process only new/modified → Update FAISS index
+
+**Query Flow**:
+1. User Query → Lambda loads FAISS from S3 → Vector search → Retrieve top-k chunks
+2. Chunks + Query → Bedrock Claude → Generate answer with citations
+3. Return response with source document links (Google Drive)
+
+**Security**: All traffic encrypted (TLS 1.3), authentication via AWS Cognito
+
+**See**: `DRIVE_SYNC_ARCHITECTURE.md` for detailed sync implementation
 
 ---
 
@@ -79,30 +89,53 @@ A privacy-first conversational AI system that enables natural language querying 
 
 ### 3.1 RAG Pipeline
 
-#### 3.1.1 Document Ingestion Service
+#### 3.1.1 Document Sync & Processing Service
 
-**Technology**: AWS Lambda + S3
+**Technology**: AWS Lambda + Step Functions + Google Drive API
+
+**Three Operational Modes**:
+1. **Full Sync**: Process all files from Google Drive (first-time setup)
+2. **Rebuild**: Recreate entire index with new settings
+3. **Incremental**: Process only new/modified files (ongoing)
 
 **Responsibilities**:
-- Sync documents from Google Drive to encrypted S3 bucket
-- Support formats: PDF, DOCX, TXT, images (OCR via Textract)
-- Metadata extraction (filename, date, document type)
-- Change detection (only process new/modified files)
+- Stream documents from Google Drive (no S3 storage)
+- Support formats: PDF, DOCX, TXT, Google Docs, images (OCR via Textract)
+- Extract text in-memory
+- Chunk and generate embeddings
+- Build/update FAISS index
+- Track sync state in DynamoDB
 
 **Implementation**:
 ```
-Lambda Function: document-ingest-service
-Runtime: Python 3.11
-Memory: 2048 MB
-Timeout: 15 minutes
-Trigger: CloudWatch Events (scheduled) + Manual S3 events
+Lambda: drive-sync-orchestrator
+  - Routes to appropriate sync mode
+  - Triggers Step Functions for full/rebuild
+  - Direct invoke for incremental
+
+Lambda: drive-process-file (worker)
+  - Download file from Drive (streaming)
+  - Extract text
+  - Generate embeddings (Bedrock)
+  - Update FAISS index in S3
+  Runtime: Python 3.11
+  Memory: 2048-3008 MB
+  Timeout: 15 minutes
+
+Step Functions: sync-workflow
+  - Orchestrates full sync
+  - Parallel processing (5-10 files at a time)
+  - Error handling & retries
 ```
 
 **Google Drive Integration**:
 - OAuth 2.0 with Drive API v3
 - Credentials stored in AWS Secrets Manager
 - Scoped permissions: `drive.readonly`
-- Incremental sync using Drive API change tokens
+- Incremental sync using Drive API change tokens (changes.list)
+- Scheduled sync: Every 15 minutes via CloudWatch Events
+
+**See**: `DRIVE_SYNC_ARCHITECTURE.md` for complete implementation details
 
 #### 3.1.2 Document Processing Pipeline
 
@@ -148,47 +181,76 @@ Trigger: CloudWatch Events (scheduled) + Manual S3 events
 
 **Fallback**: OpenAI `text-embedding-3-small` (if Bedrock unavailable)
 
-#### 3.1.4 Vector Database
+#### 3.1.4 Vector Storage
 
-**Primary Option**: Amazon OpenSearch Serverless
+**Primary Option: S3 + FAISS (In-Memory)** ✅ Recommended
+
+For small-medium datasets (<10,000 documents), store FAISS index directly in S3:
+
+**Architecture**:
+```
+S3 Bucket Structure:
+vectors/
+  ├── user_123/
+  │   ├── index.faiss          # FAISS index file (binary)
+  │   ├── metadata.json        # Chunk text + Drive file links
+  │   └── sync_state.json      # Last sync token, document registry
+```
+
+**Query-time behavior**:
+1. Lambda downloads `index.faiss` from S3 (~100 MB, <1s)
+2. Loads into Lambda memory (3008 MB allocation)
+3. Performs vector search using FAISS
+4. Results cached in Lambda `/tmp` for subsequent queries
+
+**FAISS Configuration**:
+```python
+import faiss
+import numpy as np
+
+# For datasets <100K vectors: use flat index
+dimension = 1024
+index = faiss.IndexFlatL2(dimension)  # Exact search
+
+# For 100K-1M vectors: use HNSW for speed
+index = faiss.IndexHNSWFlat(dimension, 32)  # M=32, approximate search
+
+# For deletions support: wrap with IndexIDMap
+index = faiss.IndexIDMap(base_index)
+index.add_with_ids(embeddings, ids)
+index.remove_ids(ids_to_delete)  # Efficient deletion
+```
+
+**Pros**:
+- ✅ **Cost**: ~$0.25/month vs $350/month (OpenSearch)
+- ✅ **Privacy**: Complete control, no external service
+- ✅ **Simplicity**: Just S3, no VPC networking
+- ✅ **Good for <100K vectors**: Fast enough for personal use
+
+**Cons**:
+- ❌ Cold start: 500ms-2s to load index on first query
+- ❌ Lambda memory limit: 10 GB max (~10M vectors)
+- ❌ Manual index management: No built-in features
+
+---
+
+**Alternative for Large Scale: Amazon OpenSearch Serverless**
+
+Use when:
+- >10,000 documents
+- >100 queries/day
+- <1s latency required
+- Real-time incremental updates
 
 **Configuration**:
 - Collection type: Vector search
-- Engine: FAISS-based ANN
-- Index settings:
-  ```json
-  {
-    "settings": {
-      "index.knn": true,
-      "index.knn.algo_param.ef_search": 512
-    },
-    "mappings": {
-      "properties": {
-        "embedding": {
-          "type": "knn_vector",
-          "dimension": 1024,
-          "method": {
-            "name": "hnsw",
-            "space_type": "cosinesimilarity",
-            "engine": "faiss"
-          }
-        },
-        "text": {"type": "text"},
-        "metadata": {"type": "object"}
-      }
-    }
-  }
-  ```
+- Deployed in private VPC
+- KMS encryption
+- Cost: ~$350/month
 
-**Alternative**: Pinecone (Serverless)
-- Index: 1024 dimensions, cosine similarity
-- Namespace: per-user isolation
-- Metadata filtering enabled
-
-**Privacy**:
-- OpenSearch deployed in private VPC subnets
-- No public endpoints
-- Encryption at rest (AWS KMS)
+**Alternative: Pinecone Serverless**
+- Cost: ~$70/month
+- External service (consider privacy implications)
 
 ### 3.2 AI Agent
 
@@ -518,9 +580,10 @@ Session Duration: 1 hour (refresh: 30 days)
 | **Authentication** | AWS Cognito | Managed service, OAuth/OIDC support |
 | **LLM** | Amazon Bedrock (Claude 3.5 Sonnet) | Privacy (no data retention), high quality, AWS integration |
 | **Embeddings** | Titan Embeddings v2 | AWS-native, cost-effective, performant |
-| **Vector Database** | OpenSearch Serverless | AWS-native, serverless, vector search optimized |
-| **Document Storage** | S3 | Durable, encrypted, lifecycle management |
+| **Vector Storage** | S3 + FAISS (in-memory) | Cost-effective ($0.003/mo vs $350), simple, privacy-focused |
+| **Document Source** | Google Drive | Single source of truth, no duplicate storage |
 | **Session Storage** | DynamoDB | Serverless, fast, TTL support |
+| **Sync State** | DynamoDB | Track sync jobs, user preferences |
 | **Orchestration** | Step Functions | Visual workflows, error handling, retries |
 | **Secrets** | Secrets Manager | Automatic rotation, encryption |
 | **Monitoring** | CloudWatch + X-Ray | Integrated logging, distributed tracing |
@@ -623,29 +686,60 @@ Session Duration: 1 hour (refresh: 30 days)
 - 500 documents (~5,000 chunks)
 - 100 queries/day (~3,000/month)
 - Single user
+- Google Drive as source (no S3 document storage)
+- S3 + FAISS for vector storage
 
-| Service | Usage | Cost |
-|---------|-------|------|
-| **S3** | 5 GB storage, 500 GET requests | $0.12 |
-| **Lambda** | 3,000 invocations, 512MB, 5s avg | $0.50 |
-| **Bedrock (Claude Sonnet)** | 3,000 queries, 2K input + 1K output tokens | $18.00 |
-| **Bedrock (Titan Embeddings)** | 5,000 chunks × 512 tokens | $0.65 |
-| **OpenSearch Serverless** | 1 OCU (indexing + search) | $350.00 |
-| **DynamoDB** | 5 GB storage, on-demand | $1.25 |
+### Primary Architecture (S3 + FAISS)
+
+| Service | Usage | Monthly Cost |
+|---------|-------|--------------|
+| **Google Drive** | 15 GB storage | $0 (included) |
+| **S3 (vectors only)** | 100 MB storage, 3,000 GET | $0.003 |
+| **Lambda (Sync)** | 500 files/month × 30s = 4.2 hrs | $2.50 |
+| **Lambda (Query)** | 3,000 invocations × 3s, 3008 MB | $1.80 |
+| **Bedrock (Claude Sonnet)** | 3,000 queries, 2K input + 1K output | $18.00 |
+| **Bedrock (Titan Embeddings)** | 5,000 chunks × 512 tokens | $0.65 (one-time) |
+| **DynamoDB** | Sync state + sessions, on-demand | $1.25 |
+| **Step Functions** | 500 state transitions/month | $0.01 |
 | **API Gateway** | 3,000 requests | $0.01 |
 | **Cognito** | 1 MAU | Free |
-| **CloudWatch** | 5 GB logs | $2.50 |
+| **CloudWatch Logs** | 5 GB | $2.50 |
 | **Vercel** | Hobby plan | $0 (or $20 Pro) |
-| **Data Transfer** | 10 GB | $0.90 |
-| **Total** | | **~$373.93/month** |
+| **Data Transfer** | 1 GB | $0.09 |
+| **Total (Ongoing)** | | **~$26.16/month** |
 
-**Cost Optimization Options**:
-1. **Replace OpenSearch with Pinecone Serverless**: ~$70/month → Save $280/month
-2. **Use self-hosted pgvector (RDS Aurora Serverless v2)**: ~$45/month → Save $305/month
-3. **Cache frequent queries**: Reduce Bedrock costs by 30-50%
-4. **Reserved capacity**: If usage predictable
+**Initial Setup Cost**: +$0.65 (one-time embedding generation)
 
-**Optimized Estimate with Pinecone**: **~$94/month**
+---
+
+### Alternative: Large Scale (OpenSearch Serverless)
+
+For >10,000 documents, >100 queries/day:
+
+| Service | Monthly Cost |
+|---------|--------------|
+| Base architecture | $26.16 |
+| **OpenSearch Serverless** | $350.00 |
+| Remove S3 vector storage | -$0.003 |
+| **Total** | **~$376/month** |
+
+---
+
+### Cost Optimization Tips
+
+1. **Reduce Bedrock costs** (30-50% savings):
+   - Cache frequent queries in DynamoDB
+   - Use Claude Haiku for simple questions ($0.80 vs $18)
+
+2. **Reduce Lambda costs**:
+   - Tune memory allocation (test 1024MB vs 3008MB)
+   - Use Lambda SnapStart (reduce cold starts)
+
+3. **Incremental sync only**:
+   - Skip full rebuilds unless necessary
+   - Reduces Lambda compute time
+
+**Optimized estimate**: **~$20/month** (with caching + Haiku for 50% of queries)
 
 ---
 
@@ -843,7 +937,7 @@ cdk deploy   # Deploy to AWS
 **Project Owner**: [Your Name]
 **AWS Account ID**: [Your Account]
 **Estimated Timeline**: 11 weeks
-**Budget**: ~$400/month (optimized: ~$100/month)
+**Budget**: ~$26/month (optimized: ~$20/month with caching)
 
 ---
 
